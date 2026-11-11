@@ -11,6 +11,8 @@ import {
   LockKeyhole,
   BookHeart,
   Sparkles,
+  ImagePlus,
+  Bell,
 } from "lucide-react";
 import "./App.css";
 
@@ -32,6 +34,15 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [entryError, setEntryError] = useState("");
   const [entryMessage, setEntryMessage] = useState("");
+
+  // Photo memory states
+  const [photos, setPhotos] = useState([]);
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoTitle, setPhotoTitle] = useState("");
+  const [photoCaption, setPhotoCaption] = useState("");
+  const [photoSaving, setPhotoSaving] = useState(false);
+  const [photoError, setPhotoError] = useState("");
+  const [photoMessage, setPhotoMessage] = useState("");
 
   const anniversary = new Date("2026-07-17T00:00:00");
   const daysTogether = Math.max(
@@ -65,6 +76,10 @@ function App() {
     }
 
     loadEntries();
+
+    if (activeTab === "memories") {
+      loadPhotos();
+    }
   }, [loggedIn, activeTab]);
 
   async function loadEntries() {
@@ -87,6 +102,73 @@ function App() {
       setEntries(data);
     } catch (err) {
       setEntryError(err.message);
+    }
+  }
+
+  async function loadPhotos() {
+    setPhotoError("");
+
+    try {
+      const response = await fetch(`${API}/api/photos`, {
+        credentials: "include",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Could not load photos");
+      }
+
+      setPhotos(data);
+    } catch (err) {
+      setPhotoError(err.message);
+    }
+  }
+
+  async function uploadPhoto(event) {
+    event.preventDefault();
+
+    if (!photoFile) {
+      setPhotoError("Please choose a photo first.");
+      return;
+    }
+
+    setPhotoSaving(true);
+    setPhotoError("");
+    setPhotoMessage("");
+
+    const formData = new FormData();
+    formData.append("photo", photoFile);
+    formData.append("title", photoTitle);
+    formData.append("caption", photoCaption);
+
+    try {
+      const response = await fetch(`${API}/api/photos`, {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Could not upload photo");
+      }
+
+      setPhotoTitle("");
+      setPhotoCaption("");
+      setPhotoFile(null);
+
+      const fileInput = document.getElementById("memory-photo");
+      if (fileInput) fileInput.value = "";
+
+      setPhotoMessage("Your special photo has been saved! ❤️");
+
+      await loadPhotos();
+    } catch (err) {
+      setPhotoError(err.message);
+    } finally {
+      setPhotoSaving(false);
     }
   }
 
@@ -141,6 +223,8 @@ function App() {
     setUsername("");
     setPassword("");
     setEntries([]);
+    setPhotos([]);
+    setPhotoFile(null);
     setActiveTab("home");
   }
 
@@ -226,6 +310,102 @@ function App() {
     );
   }
 
+  function renderPhotoForm() {
+    return (
+      <form className="entry-form" onSubmit={uploadPhoto}>
+        <h3>
+          Add a photo memory
+          <ImagePlus size={19} />
+        </h3>
+
+        <label>Choose a photo</label>
+        <input
+          id="memory-photo"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          onChange={(e) => setPhotoFile(e.target.files?.[0] || null)}
+          required
+        />
+
+        <label>Photo title</label>
+        <input
+          value={photoTitle}
+          onChange={(e) => setPhotoTitle(e.target.value)}
+          placeholder="Our beautiful day..."
+          maxLength={150}
+          required
+        />
+
+        <label>Caption</label>
+        <textarea
+          value={photoCaption}
+          onChange={(e) => setPhotoCaption(e.target.value)}
+          placeholder="What made this moment special?"
+          maxLength={1000}
+          rows={3}
+        />
+
+        <p className="muted">
+          JPEG, PNG or WebP. Maximum size: 5 MB.
+        </p>
+
+        {photoError && <p className="error">{photoError}</p>}
+
+        {photoMessage && (
+          <p className="success-message">{photoMessage}</p>
+        )}
+
+        <button type="submit" disabled={photoSaving}>
+          {photoSaving ? "Uploading..." : "Save our photo ❤️"}
+        </button>
+      </form>
+    );
+  }
+
+  function renderPhotoGallery() {
+    if (photoError && photos.length === 0) {
+      return <p className="error">{photoError}</p>;
+    }
+
+    if (photos.length === 0) {
+      return (
+        <div className="empty-card">
+          <Camera size={30} />
+          <h3>No photos saved yet</h3>
+          <p>Upload your first special picture together.</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="entries-list">
+        {photos.map((photo) => (
+          <article className="entry-card" key={photo.id}>
+            <img
+              src={`${API}${photo.image_url}`}
+              alt={photo.title}
+              style={{
+                width: "100%",
+                maxHeight: "350px",
+                objectFit: "cover",
+                borderRadius: "12px",
+                marginBottom: "12px",
+              }}
+            />
+
+            <h3>{photo.title}</h3>
+            {photo.caption && <p>{photo.caption}</p>}
+
+            <small>
+              Added by {photo.created_by} ·{" "}
+              {new Date(photo.created_at).toLocaleDateString()}
+            </small>
+          </article>
+        ))}
+      </div>
+    );
+  }
+
   function renderContent() {
     if (activeTab === "memories" || activeTab === "letters") {
       const isMemory = activeTab === "memories";
@@ -244,6 +424,15 @@ function App() {
               ? "Every special moment deserves a place in our story."
               : "Words from the heart, saved for us."}
           </p>
+
+          {isMemory && renderPhotoForm()}
+
+          {isMemory && (
+            <>
+              <h3 className="saved-heading">Our photo gallery</h3>
+              {renderPhotoGallery()}
+            </>
+          )}
 
           {renderEntryForm(isMemory ? "memory" : "letter")}
 
