@@ -1,16 +1,23 @@
 ﻿
 import os
 from datetime import datetime, timedelta
+from uuid import uuid4
+from io import BytesIO
 
-from flask import Flask, request, jsonify, session
+from flask import (
+    Flask, request, jsonify, session,
+    send_from_directory
+)
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import check_password_hash
 from dotenv import load_dotenv
+from PIL import Image, UnidentifiedImageError
 
 load_dotenv()
 
 app = Flask(__name__)
+
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
 
 if not app.config["SECRET_KEY"]:
@@ -18,9 +25,17 @@ if not app.config["SECRET_KEY"]:
 
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///love_diary.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
+
+app.config["UPLOAD_FOLDER"] = os.path.join(
+    app.root_path, "uploads", "memories"
+)
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 db = SQLAlchemy(app)
 
@@ -48,6 +63,34 @@ class DiaryEntry(db.Model):
     content = db.Column(db.Text, nullable=False)
     created_by = db.Column(db.String(30), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class PhotoMemory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(100), unique=True, nullable=False)
+    title = db.Column(db.String(150), nullable=False)
+    caption = db.Column(db.String(1000), nullable=True)
+    created_by = db.Column(db.String(30), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+def logged_in_user():
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return None
+
+    user = db.session.get(User, user_id)
+
+    if not user:
+        session.clear()
+
+    return user
+
+
+@app.errorhandler(413)
+def file_too_large(error):
+    return jsonify({"error": "Photo must be 5 MB or smaller"}), 413
 
 
 @app.route("/")
@@ -94,15 +137,9 @@ def login():
 
 @app.route("/api/me")
 def me():
-    user_id = session.get("user_id")
-
-    if not user_id:
-        return jsonify({"error": "Please log in"}), 401
-
-    user = db.session.get(User, user_id)
+    user = logged_in_user()
 
     if not user:
-        session.clear()
         return jsonify({"error": "Please log in"}), 401
 
     return jsonify({"username": user.username})
@@ -116,7 +153,9 @@ def logout():
 
 @app.route("/api/private")
 def private():
-    if not session.get("user_id"):
+    user = logged_in_user()
+
+    if not user:
         return jsonify({"error": "Login required"}), 401
 
     return jsonify({
@@ -126,15 +165,9 @@ def private():
 
 @app.route("/api/entries", methods=["GET", "POST"])
 def entries():
-    user_id = session.get("user_id")
-
-    if not user_id:
-        return jsonify({"error": "Please log in"}), 401
-
-    user = db.session.get(User, user_id)
+    user = logged_in_user()
 
     if not user:
-        session.clear()
         return jsonify({"error": "Please log in"}), 401
 
     if request.method == "GET":
@@ -143,6 +176,8 @@ def entries():
         query = DiaryEntry.query
 
         if kind:
+            if kind not in ["memory", "letter"]:
+                return jsonify({"error": "Invalid entry type"}), 400
             query = query.filter_by(kind=kind)
 
         saved_entries = query.order_by(
@@ -179,6 +214,9 @@ def entries():
     if not title or not content:
         return jsonify({"error": "Please enter a title and content"}), 400
 
+    if len(title) > 150 or len(content) > 10000:
+        return jsonify({"error": "Entry is too long"}), 400
+
     entry = DiaryEntry(
         kind=kind,
         title=title,
@@ -198,6 +236,124 @@ def entries():
         "created_by": entry.created_by,
         "created_at": entry.created_at.isoformat()
     }), 201
+
+
+@app.route("/api/photos", methods=["GET", "POST"])
+def photos():
+    user = logged_in_user()
+
+    if not user:
+        return jsonify({"error": "Please log in"}), 401
+
+    if request.method == "GET":
+        saved_photos = PhotoMemory.query.order_by(
+            PhotoMemory.created_at.desc()
+        ).all()
+
+        return jsonify([
+            {
+                "id": photo.id,
+                "title": photo.title,
+                "caption": photo.caption,
+                "filename": photo.filename,
+                "image_url": f"/api/photos/{photo.filename}",
+                "created_by": photo.created_by,
+                "created_at": photo.created_at.isoformat()
+            }
+            for photo in saved_photos
+        ])
+
+    photo_file = request.files.get("photo")
+    title = request.form.get("title", "").strip()
+    caption = request.form.get("caption", "").strip()
+
+    if not photo_file or not photo_file.filename:
+        return jsonify({"error": "Please select a photo"}), 400
+
+    if not title:
+        return jsonify({"error": "Please enter a photo title"}), 400
+
+    if len(title) > 150 or len(caption) > 1000:
+        return jsonify({"error": "Title or caption is too long"}), 400
+
+    try:
+        image = Image.open(photo_file.stream)
+
+        if image.format not in ["JPEG", "PNG", "WEBP"]:
+            return jsonify({
+                "error": "Only JPEG, PNG and WebP photos are allowed"
+            }), 400
+
+        image.verify()
+
+        photo_file.stream.seek(0)
+
+        image = Image.open(photo_file.stream)
+        image.load()
+
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+        return jsonify({"error": "Invalid or unsupported image"}), 400
+
+    extension = {
+        "JPEG": ".jpg",
+        "PNG": ".png",
+        "WEBP": ".webp"
+    }[image.format]
+
+    filename = f"{uuid4().hex}{extension}"
+    upload_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+
+    try:
+        image.save(upload_path, format=image.format)
+
+        photo = PhotoMemory(
+            filename=filename,
+            title=title,
+            caption=caption,
+            created_by=user.username
+        )
+
+        db.session.add(photo)
+        db.session.commit()
+
+    except Exception:
+        db.session.rollback()
+
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+
+        app.logger.exception("Photo upload failed")
+        return jsonify({"error": "Could not save photo"}), 500
+
+    return jsonify({
+        "message": "Photo uploaded successfully ❤️",
+        "id": photo.id,
+        "title": photo.title,
+        "caption": photo.caption,
+        "filename": photo.filename,
+        "image_url": f"/api/photos/{photo.filename}",
+        "created_by": photo.created_by,
+        "created_at": photo.created_at.isoformat()
+    }), 201
+
+
+@app.route("/api/photos/<filename>")
+def serve_photo(filename):
+    user = logged_in_user()
+
+    if not user:
+        return jsonify({"error": "Please log in"}), 401
+
+    photo = PhotoMemory.query.filter_by(filename=filename).first()
+
+    if not photo:
+        return jsonify({"error": "Photo not found"}), 404
+
+    return send_from_directory(
+        app.config["UPLOAD_FOLDER"],
+        photo.filename,
+        max_age=0
+    )
 
 
 if __name__ == "__main__":
