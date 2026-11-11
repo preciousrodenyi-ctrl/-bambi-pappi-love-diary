@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Heart,
   Camera,
@@ -13,6 +13,9 @@ import {
   Sparkles,
   ImagePlus,
   Bell,
+  X,
+  CheckCheck,
+  BellRing,
 } from "lucide-react";
 import "./App.css";
 
@@ -43,6 +46,18 @@ function App() {
   const [photoSaving, setPhotoSaving] = useState(false);
   const [photoError, setPhotoError] = useState("");
   const [photoMessage, setPhotoMessage] = useState("");
+
+  // Notification states
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notificationPermission, setNotificationPermission] =
+    useState("default");
+  const [notificationError, setNotificationError] = useState("");
+
+  // Remember notification IDs already seen by this browser session
+  const seenNotificationIds = useRef(new Set());
+  const notificationInitialized = useRef(false);
 
   const anniversary = new Date("2026-07-17T00:00:00");
   const daysTogether = Math.max(
@@ -81,6 +96,132 @@ function App() {
       loadPhotos();
     }
   }, [loggedIn, activeTab]);
+
+  // Check for new notifications every 8 seconds
+  useEffect(() => {
+    if (!loggedIn) return;
+
+    if ("Notification" in window) {
+      setNotificationPermission(Notification.permission);
+    }
+
+    loadNotifications();
+
+    const interval = setInterval(() => {
+      loadNotifications();
+    }, 8000);
+
+    return () => clearInterval(interval);
+  }, [loggedIn]);
+
+  async function loadNotifications() {
+    try {
+      const response = await fetch(`${API}/api/notifications`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const incoming = data.notifications || [];
+
+      if (!notificationInitialized.current) {
+        incoming.forEach((item) => {
+          seenNotificationIds.current.add(item.id);
+        });
+
+        notificationInitialized.current = true;
+      } else {
+        incoming.forEach((item) => {
+          const isNew = !seenNotificationIds.current.has(item.id);
+
+          if (isNew) {
+            seenNotificationIds.current.add(item.id);
+
+            if (
+              !item.is_read &&
+              "Notification" in window &&
+              Notification.permission === "granted"
+            ) {
+              const popup = new Notification("Bambi & Pappi ❤️", {
+                body: item.message,
+                icon: "/favicon.ico",
+              });
+
+              popup.onclick = () => {
+                window.focus();
+                setShowNotifications(true);
+                popup.close();
+              };
+            }
+          }
+        });
+      }
+
+      setNotifications(incoming);
+      setUnreadCount(data.unread_count || 0);
+    } catch (err) {
+      console.error("Could not load notifications:", err);
+    }
+  }
+
+  async function enableBrowserNotifications() {
+    setNotificationError("");
+
+    if (!("Notification" in window)) {
+      setNotificationError(
+        "Your browser does not support notifications."
+      );
+      return;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+
+      setNotificationPermission(permission);
+
+      if (permission === "granted") {
+        new Notification("Bambi & Pappi ❤️", {
+          body: "Notifications are now enabled!",
+        });
+      } else if (permission === "denied") {
+        setNotificationError(
+          "Notifications were blocked. You can enable them in your browser settings."
+        );
+      }
+    } catch {
+      setNotificationError("Could not enable browser notifications.");
+    }
+  }
+
+  async function markNotificationsRead() {
+    try {
+      const response = await fetch(`${API}/api/notifications/read`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!response.ok) return;
+
+      setNotifications((previous) =>
+        previous.map((item) => ({ ...item, is_read: true }))
+      );
+
+      setUnreadCount(0);
+    } catch (err) {
+      console.error("Could not mark notifications as read:", err);
+    }
+  }
+
+  async function toggleNotifications() {
+    const opening = !showNotifications;
+
+    setShowNotifications(opening);
+
+    if (opening) {
+      await markNotificationsRead();
+    }
+  }
 
   async function loadEntries() {
     const kind = activeTab === "memories" ? "memory" : "letter";
@@ -193,6 +334,12 @@ function App() {
         throw new Error(data.error || "Login failed");
       }
 
+      seenNotificationIds.current = new Set();
+      notificationInitialized.current = false;
+
+      setNotifications([]);
+      setUnreadCount(0);
+      setShowNotifications(false);
       setCurrentUser(data.username);
       setLoggedIn(true);
       setPassword("");
@@ -225,6 +372,11 @@ function App() {
     setEntries([]);
     setPhotos([]);
     setPhotoFile(null);
+    setNotifications([]);
+    setUnreadCount(0);
+    setShowNotifications(false);
+    seenNotificationIds.current = new Set();
+    notificationInitialized.current = false;
     setActiveTab("home");
   }
 
@@ -402,6 +554,136 @@ function App() {
             </small>
           </article>
         ))}
+      </div>
+    );
+  }
+
+  function renderNotificationPanel() {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          top: "48px",
+          right: 0,
+          width: "min(340px, 88vw)",
+          maxHeight: "420px",
+          overflowY: "auto",
+          background: "#1c1719",
+          color: "#fff",
+          border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: "14px",
+          padding: "16px",
+          boxShadow: "0 12px 35px rgba(0,0,0,0.35)",
+          zIndex: 1000,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "10px",
+            marginBottom: "14px",
+          }}
+        >
+          <h3 style={{ margin: 0 }}>Our notifications ❤️</h3>
+
+          <button
+            type="button"
+            onClick={() => setShowNotifications(false)}
+            aria-label="Close notifications"
+            style={{
+              background: "transparent",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            <X size={19} />
+          </button>
+        </div>
+
+        <div style={{ marginBottom: "14px" }}>
+          {notificationPermission === "granted" ? (
+            <p className="muted" style={{ fontSize: "12px" }}>
+              <BellRing size={14} /> Browser notifications are enabled.
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={enableBrowserNotifications}
+              style={{
+                width: "100%",
+                padding: "10px",
+                borderRadius: "8px",
+                border: "1px solid #a8324a",
+                background: "#a8324a",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              <BellRing size={15} /> Enable browser notifications
+            </button>
+          )}
+
+          {notificationError && (
+            <p className="error">{notificationError}</p>
+          )}
+        </div>
+
+        {notifications.length === 0 ? (
+          <div className="empty-card">
+            <Heart size={25} />
+            <p>No notifications yet.</p>
+            <small>Something special will appear here.</small>
+          </div>
+        ) : (
+          <div>
+            {notifications.map((item) => (
+              <div
+                key={item.id}
+                style={{
+                  padding: "12px",
+                  marginBottom: "9px",
+                  borderRadius: "9px",
+                  background: item.is_read ? "#292326" : "#40232c",
+                  borderLeft: item.is_read
+                    ? "3px solid #62545a"
+                    : "3px solid #f05b78",
+                }}
+              >
+                <p style={{ margin: "0 0 6px", fontSize: "14px" }}>
+                  <Heart
+                    size={14}
+                    style={{
+                      display: "inline",
+                      marginRight: "6px",
+                      color: "#f05b78",
+                    }}
+                  />
+                  {item.message}
+                </p>
+
+                <small style={{ color: "#c5b7bd" }}>
+                  {new Date(item.created_at).toLocaleString()}
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {notifications.length > 0 && (
+          <p
+            style={{
+              fontSize: "12px",
+              color: "#c5b7bd",
+              textAlign: "center",
+              marginBottom: 0,
+            }}
+          >
+            <CheckCheck size={14} /> Notifications are marked as read when opened.
+          </p>
+        )}
       </div>
     );
   }
@@ -632,6 +914,56 @@ function App() {
 
             <div className="user-info">
               <span>Welcome, {currentUser}</span>
+
+              <div style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  onClick={toggleNotifications}
+                  aria-label="Open notifications"
+                  title="Notifications"
+                  style={{
+                    position: "relative",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "9px",
+                    marginRight: "8px",
+                    borderRadius: "50%",
+                    border: "1px solid rgba(255,255,255,0.2)",
+                    background: "#302126",
+                    color: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Bell size={19} />
+
+                  {unreadCount > 0 && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: "-5px",
+                        right: "-5px",
+                        minWidth: "18px",
+                        height: "18px",
+                        padding: "0 4px",
+                        borderRadius: "20px",
+                        background: "#ed4264",
+                        color: "#fff",
+                        fontSize: "11px",
+                        fontWeight: "bold",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {showNotifications && renderNotificationPanel()}
+              </div>
+
               <button className="logout-button" onClick={handleLogout}>
                 <LogOut size={16} /> Log out
               </button>
