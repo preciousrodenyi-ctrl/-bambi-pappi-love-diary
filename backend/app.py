@@ -2,7 +2,6 @@
 import os
 from datetime import datetime, timedelta
 from uuid import uuid4
-from io import BytesIO
 
 from flask import (
     Flask, request, jsonify, session,
@@ -74,6 +73,16 @@ class PhotoMemory(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class Notification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    recipient = db.Column(db.String(30), nullable=False, index=True)
+    actor = db.Column(db.String(30), nullable=False)
+    kind = db.Column(db.String(30), nullable=False)
+    message = db.Column(db.String(255), nullable=False)
+    is_read = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 def logged_in_user():
     user_id = session.get("user_id")
 
@@ -86,6 +95,25 @@ def logged_in_user():
         session.clear()
 
     return user
+
+
+def notify_partner(actor, kind, title):
+    """Notify the other person when a diary item is created."""
+    if actor.username == "precious":
+        recipient = "sam"
+    elif actor.username == "sam":
+        recipient = "precious"
+    else:
+        return
+
+    notification = Notification(
+        recipient=recipient,
+        actor=actor.username,
+        kind=kind,
+        message=f"{actor.username.capitalize()} added {kind}: {title}"
+    )
+
+    db.session.add(notification)
 
 
 @app.errorhandler(413)
@@ -172,7 +200,6 @@ def entries():
 
     if request.method == "GET":
         kind = request.args.get("kind")
-
         query = DiaryEntry.query
 
         if kind:
@@ -225,6 +252,7 @@ def entries():
     )
 
     db.session.add(entry)
+    notify_partner(user, kind, title)
     db.session.commit()
 
     return jsonify({
@@ -285,7 +313,6 @@ def photos():
             }), 400
 
         image.verify()
-
         photo_file.stream.seek(0)
 
         image = Image.open(photo_file.stream)
@@ -314,6 +341,7 @@ def photos():
         )
 
         db.session.add(photo)
+        notify_partner(user, "photo", title)
         db.session.commit()
 
     except Exception:
@@ -354,6 +382,55 @@ def serve_photo(filename):
         photo.filename,
         max_age=0
     )
+
+
+@app.route("/api/notifications", methods=["GET"])
+def get_notifications():
+    user = logged_in_user()
+
+    if not user:
+        return jsonify({"error": "Please log in"}), 401
+
+    saved_notifications = Notification.query.filter_by(
+        recipient=user.username
+    ).order_by(Notification.created_at.desc()).limit(50).all()
+
+    unread_count = Notification.query.filter_by(
+        recipient=user.username,
+        is_read=False
+    ).count()
+
+    return jsonify({
+        "unread_count": unread_count,
+        "notifications": [
+            {
+                "id": item.id,
+                "actor": item.actor,
+                "kind": item.kind,
+                "message": item.message,
+                "is_read": item.is_read,
+                "created_at": item.created_at.isoformat()
+            }
+            for item in saved_notifications
+        ]
+    })
+
+
+@app.route("/api/notifications/read", methods=["POST"])
+def mark_notifications_read():
+    user = logged_in_user()
+
+    if not user:
+        return jsonify({"error": "Please log in"}), 401
+
+    Notification.query.filter_by(
+        recipient=user.username,
+        is_read=False
+    ).update({"is_read": True})
+
+    db.session.commit()
+
+    return jsonify({"message": "Notifications marked as read"})
 
 
 if __name__ == "__main__":
